@@ -32,11 +32,11 @@ class MTUCIScheduleScraper:
         self.settings = Settings()
         self._logger = logger.bind(email=auth_config.email)
         self.authenticator = MTUCIAuthenticator(auth_config)
-        self.schedule_url = f"{self.settings.mtuci.base_url}/student/schedule"
+        self.schedule_url = f"{self.settings.mtuci_base_url}/student/schedule"
 
         # Initialize timeouts and retries
-        self.max_retries = max_retries or self.settings.scraping.max_retries
-        self.timeout_ms = timeout_ms or self.settings.scraping.timeout_ms
+        self.max_retries = max_retries or self.settings.scraping_max_retries
+        self.timeout_ms = timeout_ms or self.settings.scraping_timeout_ms
 
         self._logger.info(
             "Scraper initialized",
@@ -102,7 +102,7 @@ class MTUCIScheduleScraper:
                 location=location,
                 start_time=start_time,
                 end_time=end_time,
-                group=self.settings.DEFAULT_GROUP,
+                group=self.settings.scraping_default_group,
                 subgroup=None,
             )
 
@@ -176,13 +176,14 @@ class MTUCIScheduleScraper:
             # Handle special locations
             special_locations = {
                 "Зал аэробики": Location(
-                    building=self.settings.DEFAULT_BUILDING, room="Зал аэробики"
+                    building=self.settings.scraping_default_building,
+                    room="Зал аэробики",
                 ),
                 "Спортивный зал": Location(
-                    building=self.settings.DEFAULT_BUILDING, room="Спортзал"
+                    building=self.settings.scraping_default_building, room="Спортзал"
                 ),
                 "Актовый зал": Location(
-                    building=self.settings.DEFAULT_BUILDING, room="Актовый зал"
+                    building=self.settings.scraping_default_building, room="Актовый зал"
                 ),
             }
 
@@ -195,7 +196,7 @@ class MTUCIScheduleScraper:
                 return Location(building=building.strip(), room=room.strip())
 
             return Location(
-                building=self.settings.DEFAULT_BUILDING, room=room_text.strip()
+                building=self.settings.scraping_default_building, room=room_text.strip()
             )
 
         except Exception as e:

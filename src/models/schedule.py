@@ -5,9 +5,6 @@ from enum import Enum
 from pydantic import BaseModel
 from pydantic import Field
 
-from src.core.config import BUILDING_NORTH
-from src.core.config import GROUP_BIK2024
-
 
 class ModelValidationError(ValueError):
     """Base validation error."""
@@ -59,10 +56,10 @@ class ScheduleEvent(BaseModel):
                 "subject": "Высшая математика",
                 "teacher": "Лакерник Александр Рафаилович",
                 "lesson_type": "Лекция",
-                "location": {"building": BUILDING_NORTH, "room": "310"},
+                "location": {"building": "Н", "room": "310"},  # noqa: RUF001
                 "start_time": "2024-02-12T09:30:00",
                 "end_time": "2024-02-12T11:05:00",
-                "group": GROUP_BIK2024,
+                "group": "БИК2404",  # noqa: RUF001
                 "subgroup": 1,
             }
         }

@@ -38,7 +38,7 @@ class ScheduleSyncApp:
     def __init__(self) -> None:
         """Initialize application with configuration and services."""
         try:
-            self.settings = Settings(_env_file=ENV_FILE)
+            self.settings = Settings(env_file=ENV_FILE)
             self._init_configs()
             self._init_services()
         except Exception as e:
@@ -48,16 +48,16 @@ class ScheduleSyncApp:
     def _init_configs(self) -> None:
         """Initialize configuration objects for auth and calendar."""
         self.auth_config = AuthConfig(
-            email=self.settings.mtuci.email,
-            password=self.settings.mtuci.password,
-            login_url=f"{self.settings.mtuci.base_url}/auth/login",
+            email=self.settings.mtuci_email,
+            password=self.settings.mtuci_password,
+            login_url=f"{self.settings.mtuci_base_url}/auth/login",
         )
 
         self.calendar_config = CalendarConfig(
-            credentials_path=str(self.settings.google_calendar.credentials_path),
-            calendar_id=self.settings.google_calendar.calendar_id,
-            calendar_name=self.settings.google_calendar.calendar_name,
-            token_path=str(self.settings.google_calendar.token_path),
+            credentials_path=str(self.settings.google_credentials_path),
+            calendar_id=self.settings.google_calendar_id,
+            calendar_name=self.settings.google_calendar_name,
+            token_path=str(self.settings.google_token_path),
         )
 
     def _init_services(self) -> None:
@@ -65,8 +65,8 @@ class ScheduleSyncApp:
         self.calendar_service = GoogleCalendarService(config=self.calendar_config)
         self.scraper = MTUCIScheduleScraper(
             auth_config=self.auth_config,
-            max_retries=self.settings.scraping.max_retries,
-            timeout_ms=self.settings.scraping.timeout_ms,
+            max_retries=self.settings.scraping_max_retries,
+            timeout_ms=self.settings.scraping_timeout_ms,
         )
 
     async def _setup_browser(self) -> tuple[Browser, Page]:
