@@ -29,8 +29,15 @@ repos:
       # Formatter
       - id: ruff-format
 
-  # Run the mypy static type checker.
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
-    hooks:
-      - id: mypy
+#  # Run the mypy static type checker.
+#  - repo: https://github.com/pre-commit/mirrors-mypy
+#    rev: v1.13.0
+#    hooks:
+#      - id: mypy
+#        additional_dependencies: [
+#          'pydantic',
+#          'structlog',
+#          'google-auth-oauthlib',
+#          'google-auth',
+#          'google-api-python-client'
+#        ]

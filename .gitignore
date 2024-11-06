@@ -504,3 +504,6 @@ dmypy.json
 .pyre/
 .pytype/
 cython_debug/
+.idea/
+/credentials.json
+/token.json

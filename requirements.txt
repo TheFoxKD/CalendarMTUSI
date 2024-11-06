@@ -1,0 +1,10 @@
+pydantic[email]
+structlog
+playwright
+python-dotenv
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+google-auth
+requests
+pydantic-settings
