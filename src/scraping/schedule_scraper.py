@@ -1,221 +1,355 @@
 # src/scraping/schedule_scraper.py
 
-from playwright.async_api import ElementHandle
-from playwright.async_api import Page
-from playwright.async_api import TimeoutError
+from datetime import UTC
+from datetime import datetime
+from datetime import time
 
-from src.core.config import Settings
+import structlog
+from playwright.async_api import Page
+
 from src.core.exceptions import ApplicationError
-from src.core.exceptions import ScrapingError
-from src.core.logging import get_logger
 from src.models.schedule import LessonType
 from src.models.schedule import Location
 from src.models.schedule import ScheduleEvent
 from src.scraping.auth import AuthConfig
 from src.scraping.auth import MTUCIAuthenticator
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
 
 
-class MTUCIScheduleScraper:
-    """Scraper for MTUCI schedule website with improved error handling."""
+class ScrapingError(ApplicationError):
+    """Base exception for scraping errors."""
 
-    REQUIRED_SPANS_COUNT = 4
 
-    def __init__(
-        self,
-        auth_config: AuthConfig,
-        max_retries: int | None = None,
-        timeout_ms: int | None = None,
-    ):
-        """Initialize scraper with configuration."""
-        self.settings = Settings()
-        self._logger = logger.bind(email=auth_config.email)
-        self.authenticator = MTUCIAuthenticator(auth_config)
-        self.schedule_url = f"{self.settings.mtuci_base_url}/student/schedule"
+class ScheduleParser:
+    """Parser for MTUCI schedule page."""
 
-        # Initialize timeouts and retries
-        self.max_retries = max_retries or self.settings.scraping_max_retries
-        self.timeout_ms = timeout_ms or self.settings.scraping_timeout_ms
+    MIN_TIME_LOCATION_SPANS = 2
+    MIN_TEACHER_TYPE_SPANS = 2
+    MIN_FLEX_CONTAINERS = 2
+    EXPECTED_DATE_PARTS = 2
 
-        self._logger.info(
-            "Scraper initialized",
-            max_retries=self.max_retries,
-            timeout_ms=self.timeout_ms,
-        )
+    def __init__(self, page: Page):
+        self.page = page
+        self._logger = logger.bind(component="ScheduleParser")
 
-    async def _navigate_to_schedule(self, page: Page) -> None:
-        """Navigate to schedule page with proper error handling."""
+    async def get_available_dates(self) -> list[datetime]:
+        """Get list of available dates from the schedule."""
         try:
-            await page.goto(self.schedule_url, wait_until="networkidle")
+            date_buttons = await self.page.query_selector_all(".button-day")
+            dates = []
 
-            try:
-                await page.wait_for_selector("#lessons", timeout=self.timeout_ms)
-            except TimeoutError as e:
-                raise ScrapingError(ScrapingError.SCHEDULE_NOT_FOUND) from e
+            for button in date_buttons:
+                date_text = await button.text_content()
+                if not date_text:
+                    continue
+
+                try:
+                    if "Сегодня" in date_text:
+                        date = await self._get_current_date()
+                    else:
+                        # Parse date like "07.11"
+                        date_part = date_text.split()[1]
+                        day, month = date_part.split(".")
+                        date = datetime(
+                            datetime.now(UTC).year, int(month), int(day), tzinfo=UTC
+                        )
+                    dates.append(date)
+                except (ValueError, IndexError) as e:
+                    self._logger.warning(
+                        "Failed to parse date button", text=date_text, error=str(e)
+                    )
+                    continue
+
+            return sorted(dates)
+        except Exception as e:
+            error_message = "Failed to get available dates"
+            raise ScrapingError(error_message) from e
+
+    async def _get_current_date(self) -> datetime:
+        """Get current date from page header."""
+        try:
+            header = await self.page.query_selector("h4.current-day")
+            if not header:
+                error_message = "No header"
+                self._raise_parsing_error(error_message)
+
+            date_text = await header.text_content()
+            if not date_text:
+                error_message = "No text"
+                self._raise_parsing_error(error_message)
+
+            # Parse date like "Среда, 13 ноября 2024 г."
+            parts = date_text.split(",", 1)
+            if len(parts) != self.EXPECTED_DATE_PARTS:
+                error_message = f"Invalid date format: {date_text}"
+                self._raise_parsing_error(error_message)
+
+            date_str = parts[1].strip()
+            # Convert month name to number
+            ru_months = {
+                "января": 1,
+                "февраля": 2,
+                "марта": 3,
+                "апреля": 4,
+                "мая": 5,
+                "июня": 6,
+                "июля": 7,
+                "августа": 8,
+                "сентября": 9,
+                "октября": 10,
+                "ноября": 11,
+                "декабря": 12,
+            }
+
+            # Split date parts and clean up
+            date_parts = date_str.split()
+            day = int(date_parts[0])
+            month = ru_months[date_parts[1].lower()]
+            year = int(date_parts[2])
+
+            return datetime(year, month, day, tzinfo=UTC)
 
         except Exception as e:
-            if isinstance(e, ScrapingError):
-                raise
-            error_message = "Failed to load schedule page"
-            raise ApplicationError(error_message, original_error=e) from e
+            error_message = f"Failed to parse current date: {e}"
+            raise ScrapingError(error_message) from e
 
-    def _raise_scraping_error(self, message: str) -> None:
+    async def navigate_to_date(self, target_date: datetime) -> None:
+        """Navigate to specific date in schedule."""
+        try:
+            date_buttons = await self.page.query_selector_all(".button-day")
+            for button in date_buttons:
+                date_text = await button.text_content()
+                if not date_text:
+                    continue
+
+                if "Сегодня" in date_text:
+                    current_date = await self._get_current_date()
+                    if current_date.date() == target_date.date():
+                        await button.click()
+                        await self.page.wait_for_load_state("networkidle")
+                        return
+                else:
+                    # Parse button date
+                    date_part = date_text.split()[1]
+                    day, month = map(int, date_part.split("."))
+                    button_date = datetime(target_date.year, month, day, tzinfo=UTC)
+
+                    if button_date.date() == target_date.date():
+                        await button.click()
+                        await self.page.wait_for_load_state("networkidle")
+                        return
+
+            error_message = f"Date {target_date.date()} not found in available dates"
+            self._raise_parsing_error(error_message)
+
+        except Exception as e:
+            error_message = f"Failed to navigate to date {target_date.date()}"
+            raise ScrapingError(error_message) from e
+
+    async def parse_day(self, date: datetime) -> list[ScheduleEvent]:
+        """Parse schedule for specific date."""
+        try:
+            await self.navigate_to_date(date)
+
+            lessons = await self.page.query_selector_all(".lesson")
+            events = []
+
+            for lesson in lessons:
+                try:
+                    event = await self._parse_lesson(lesson, date)
+                    events.append(event)
+                except ScrapingError as e:
+                    self._logger.warning(
+                        "Failed to parse lesson", date=date.date(), error=str(e)
+                    )
+                    continue
+        except Exception as e:
+            error_message = f"Failed to parse day {date.date()}"
+            raise ScrapingError(error_message) from e
+        else:
+            return events
+
+    def _raise_parsing_error(self, message: str) -> None:
         """Helper method to raise scraping errors."""
         raise ScrapingError(message)
 
-    async def _extract_lesson_data(self, lesson: ElementHandle) -> ScheduleEvent:
-        """Extract data from lesson element with improved validation."""
+    async def _parse_lesson(self, lesson_el, base_date: datetime) -> ScheduleEvent:
+        """Parse single lesson element."""
         try:
             # Get subject
-            subject_el = await lesson.query_selector("h4")
+            subject_el = await lesson_el.query_selector("h4")
             if not subject_el:
-                self._raise_scraping_error(ScrapingError.SUBJECT_NOT_FOUND)
-
-            subject_text = await subject_el.text_content()
+                error_message = "Subject element not found"
+                self._raise_parsing_error(error_message)
+            subject = await subject_el.text_content()
 
             # Get info div
-            info_div = await lesson.query_selector(".text-gray")
+            info_div = await lesson_el.query_selector("div.text-gray")
             if not info_div:
-                self._raise_scraping_error(ScrapingError.INFO_DIV_NOT_FOUND)
+                error_message = "Info div not found"
+                self._raise_parsing_error(error_message)
 
-            # Extract and validate all required data
-            spans = await info_div.query_selector_all("span")
-            if len(spans) < self.REQUIRED_SPANS_COUNT:
-                error_message = f"Expected 4 info spans, got {len(spans)}"
-                self._raise_scraping_error(error_message)
+            # Get teacher and lesson type
+            flex_divs = await info_div.query_selector_all(".d-flex.flex-wrap")
+            if len(flex_divs) < self.MIN_FLEX_CONTAINERS:
+                error_message = "Missing flex containers"
+                self._raise_parsing_error(error_message)
 
-            teacher = (await spans[0].text_content()).strip()
-            lesson_type_text = (await spans[1].text_content()).strip()
-            time_text = (await spans[2].text_content()).strip()
-            location_text = (await spans[3].text_content()).strip()
+            teacher_type_spans = await flex_divs[0].query_selector_all("span")
+            if len(teacher_type_spans) < self.MIN_TEACHER_TYPE_SPANS:
+                error_message = "Missing teacher or type spans"
+                self._raise_parsing_error(error_message)
 
-            # Parse components with validation
-            start_time, end_time = await self._parse_time(time_text)
-            location = await self._parse_location(location_text)
-            lesson_type = self._map_lesson_type(lesson_type_text)
+            teacher = await teacher_type_spans[0].text_content()
+            lesson_type_text = await teacher_type_spans[1].text_content()
+
+            # Parse time and location
+            time_loc_spans = await flex_divs[1].query_selector_all("span")
+            if len(time_loc_spans) < self.MIN_TIME_LOCATION_SPANS:
+                error_message = "Missing time or location spans"
+                self._raise_parsing_error(error_message)
+
+            time_text = await time_loc_spans[0].text_content()
+            location_text = await time_loc_spans[1].text_content()
+
+            # Parse time
+            start_time, end_time = self._parse_time_range(time_text)
+
+            # Parse location
+            location = self._parse_location(location_text)
 
             return ScheduleEvent(
-                subject=subject_text.strip(),
-                teacher=teacher,
-                lesson_type=lesson_type,
+                subject=subject.strip(),
+                teacher=teacher.strip(),
+                lesson_type=self._parse_lesson_type(lesson_type_text.strip()),
                 location=location,
-                start_time=start_time,
-                end_time=end_time,
-                group=self.settings.scraping_default_group,
-                subgroup=None,
+                start_time=datetime.combine(base_date.date(), start_time),
+                end_time=datetime.combine(base_date.date(), end_time),
+                group="БИК2404",  # TODO: Make configurable
             )
 
-        except ScrapingError:
-            raise
         except Exception as e:
-            error_message = f"Failed to extract lesson data: {e}"
-            raise ApplicationError(error_message, original_error=e) from e
+            error_message = f"Failed to parse lesson: {e}"
+            raise ScrapingError(error_message) from e
 
-    async def _find_lessons(self, page: Page) -> list[ElementHandle]:
-        """Find lesson elements on the page."""
-        lessons = await page.query_selector_all(".lesson")
-
-        if not lessons:
-            self._logger.warning("No lessons found, trying alternative selectors")
-            for selector in [".schedule-item", "tr.lesson-row", ".timetable-item"]:
-                lessons = await page.query_selector_all(selector)
-                if lessons:
-                    break
-
-        if not lessons:
-            self._logger.warning("No lessons found after trying all selectors")
-            return []
-
-        self._logger.info("Found %d lessons to parse", len(lessons))
-        return lessons
-
-    async def _parse_lessons(self, lessons: list[ElementHandle]) -> list[ScheduleEvent]:
-        """Parse individual lesson elements into schedule events."""
-        events = []
-        for idx, lesson in enumerate(lessons, 1):
-            try:
-                event = await self._extract_lesson_data(lesson)
-                events.append(event)
-            except Exception as e:
-                self._logger.exception(
-                    "Failed to parse lesson", lesson_number=idx, error=str(e)
-                )
-                continue
-        return events
-
-    async def parse_schedule(self, page: Page, retries: int = 0) -> list[ScheduleEvent]:
-        """Parse schedule with improved error handling and retry logic."""
+    def _parse_time_range(self, time_text: str) -> tuple[time, time]:
+        """Parse time range from text."""
         try:
-            await self.authenticator.authenticate(page)
-            await self._navigate_to_schedule(page)
-
-            lessons = await self._find_lessons(page)
-            if not lessons:
-                return []
-
-            return await self._parse_lessons(lessons)
-
-        except ApplicationError:
-            raise
+            start_str, end_str = time_text.split("–")
+            start_time = time.fromisoformat(start_str.strip())
+            end_time = time.fromisoformat(end_str.strip())
         except Exception as e:
-            if retries < self.max_retries:
-                self._logger.warning(
-                    "Retrying schedule parse", retry_count=retries + 1, error=str(e)
-                )
-                return await self.parse_schedule(page, retries + 1)
+            error_message = f"Failed to parse time range '{time_text}'"
+            raise ScrapingError(error_message) from e
+        else:
+            return start_time, end_time
 
-            error_message = "Failed to parse schedule"
-            raise ApplicationError(error_message, original_error=e) from e
-
-    async def _parse_location(self, location_text: str) -> Location:
-        """Parse location with improved error handling."""
+    def _parse_location(self, location_text: str) -> Location:
+        """Parse location from text."""
         try:
-            room_text = location_text.replace("Аудитория:", "").strip()
+            # Remove prefix
+            location_text = location_text.replace("Аудитория:", "").strip()
 
-            # Handle special locations
-            special_locations = {
-                "Зал аэробики": Location(
-                    building=self.settings.scraping_default_building,
-                    room="Зал аэробики",
-                ),
-                "Спортивный зал": Location(
-                    building=self.settings.scraping_default_building, room="Спортзал"
-                ),
-                "Актовый зал": Location(
-                    building=self.settings.scraping_default_building, room="Актовый зал"
-                ),
-            }
+            # Handle special cases
+            if location_text.lower() in ["онлайн", "online"]:
+                return Location(building="Online", room="Online")
 
-            for special_name, location in special_locations.items():
-                if special_name.lower() in room_text.lower():
-                    return location
+            if "зал" in location_text.lower():
+                return Location(building="Н", room=location_text)
 
-            if "-" in room_text:
-                building, room = room_text.split("-", 1)
+            # Parse standard format (e.g., "Н-226")
+            if "-" in location_text:
+                building, room = location_text.split("-", 1)
                 return Location(building=building.strip(), room=room.strip())
 
-            return Location(
-                building=self.settings.scraping_default_building, room=room_text.strip()
-            )
+            return Location(building="Н", room=location_text)
 
         except Exception as e:
-            error_message = f"Failed to parse location: {location_text}"
-            raise ApplicationError(error_message, original_error=e) from e
+            error_message = f"Failed to parse location '{location_text}'"
+            raise ScrapingError(error_message) from e
 
-    def _map_lesson_type(self, type_text: str) -> LessonType:
-        """Map lesson type text to enum with validation."""
-        type_map = {
+    def _parse_lesson_type(self, type_text: str) -> LessonType:
+        """Parse lesson type from text."""
+        type_mapping = {
             "Лекция": LessonType.LECTURE,
             "Практическое занятие": LessonType.PRACTICE,
             "Лабораторная работа": LessonType.LAB,
         }
 
-        mapped_type = type_map.get(type_text.strip())
-        if not mapped_type:
-            self._logger.warning(
-                "Unknown lesson type: %s, defaulting to LECTURE", type_text
-            )
-            return LessonType.LECTURE
+        try:
+            return type_mapping[type_text]
+        except KeyError:
+            error_message = f"Unknown lesson type: {type_text}"
+            raise ScrapingError(error_message) from None
 
-        return mapped_type
+
+class MTUCIScheduleScraper:
+    """Main scraper class for MTUCI schedule."""
+
+    def __init__(
+        self, auth_config: AuthConfig, max_retries: int = 3, timeout_ms: int = 30000
+    ):
+        """Initialize scraper with configuration."""
+        self.auth_config = auth_config
+        self.max_retries = max_retries
+        self.timeout_ms = timeout_ms
+        self._logger = logger.bind(component="MTUCIScheduleScraper")
+
+    async def _setup_page(self, page: Page) -> None:
+        """Setup page and authenticate."""
+        try:
+            # Authenticate
+            authenticator = MTUCIAuthenticator(self.auth_config)
+            await authenticator.authenticate(page)
+
+            # Navigate to schedule page
+            await page.goto(
+                "https://lk.mtuci.ru/student/schedule", timeout=self.timeout_ms
+            )
+            await page.wait_for_load_state("networkidle")
+
+        except Exception as e:
+            error_message = "Failed to setup page"
+            self._logger.exception(error_message, error=str(e))
+            raise ApplicationError(error_message) from e
+
+    async def parse_schedule(self, page: Page) -> list[ScheduleEvent]:
+        """Parse complete schedule."""
+        try:
+            # Setup page and authenticate
+            await self._setup_page(page)
+
+            # Create parser and get available dates
+            parser = ScheduleParser(page)
+            dates = await parser.get_available_dates()
+
+            self._logger.info(
+                "Found available dates", dates=[d.strftime("%Y-%m-%d") for d in dates]
+            )
+
+            # Parse schedule for each date
+            all_events = []
+            for date in dates:
+                try:
+                    events = await parser.parse_day(date)
+                    self._logger.info(
+                        "Parsed schedule",
+                        date=date.strftime("%Y-%m-%d"),
+                        events_count=len(events),
+                    )
+                    all_events.extend(events)
+                except ScrapingError as e:
+                    self._logger.exception(
+                        "Failed to parse date",
+                        date=date.strftime("%Y-%m-%d"),
+                        error=str(e),
+                    )
+                    continue
+
+            return sorted(all_events, key=lambda x: x.start_time)
+
+        except Exception as e:
+            error_message = "Schedule parsing failed"
+            self._logger.exception(error_message, error=str(e))
+            raise ApplicationError(error_message) from e

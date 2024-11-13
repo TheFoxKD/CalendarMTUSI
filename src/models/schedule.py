@@ -56,10 +56,10 @@ class ScheduleEvent(BaseModel):
                 "subject": "Высшая математика",
                 "teacher": "Лакерник Александр Рафаилович",
                 "lesson_type": "Лекция",
-                "location": {"building": "Н", "room": "310"},  # noqa: RUF001
+                "location": {"building": "Н", "room": "310"},
                 "start_time": "2024-02-12T09:30:00",
                 "end_time": "2024-02-12T11:05:00",
-                "group": "БИК2404",  # noqa: RUF001
+                "group": "БИК2404",
                 "subgroup": 1,
             }
         }

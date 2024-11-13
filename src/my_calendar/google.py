@@ -2,6 +2,7 @@
 
 from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 
 import structlog
 from google.auth.transport.requests import Request
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from pydantic import EmailStr
 
 from src.core.exceptions import ApplicationError
+from src.models.schedule import LessonType
 from src.models.schedule import ScheduleEvent
 
 logger = structlog.get_logger(__name__)
@@ -176,3 +178,117 @@ class GoogleCalendarService:
                 continue
 
         return event_ids
+
+    def _create_event_body(self, event: ScheduleEvent) -> dict[str, Any]:
+        """
+        Create Google Calendar event body from ScheduleEvent.
+
+        Args:
+            event: Schedule event to convert
+
+        Returns:
+            Dictionary containing event data in Google Calendar API format
+
+        Example:
+            >>> event = ScheduleEvent(
+            ...     subject="Math",
+            ...     teacher="John Doe",
+            ...     lesson_type=LessonType.LECTURE,
+            ...     location=Location(building="A", room="101"),
+            ...     start_time=datetime(2024, 2, 1, 9, 30),
+            ...     end_time=datetime(2024, 2, 1, 11, 0),
+            ...     group="BIK2404"
+            ... )
+            >>> body = calendar_service._create_event_body(event)
+            >>> assert "summary" in body
+            >>> assert "location" in body
+        """
+        # Format event summary
+        summary = f"{event.subject} ({event.lesson_type.value})"
+        if event.subgroup:
+            summary += f" - Подгруппа {event.subgroup}"
+
+        # Format description with additional details
+        description = (
+            f"Преподаватель: {event.teacher}\n"
+            f"Тип занятия: {event.lesson_type.value}\n"
+            f"Группа: {event.group}"
+        )
+
+        # Format location string
+        location = str(event.location)
+
+        # Create event body according to Google Calendar API spec
+        # https://developers.google.com/calendar/api/v3/reference/events#resource
+        event_body = {
+            "summary": summary,
+            "location": location,
+            "description": description,
+            "start": {
+                "dateTime": event.start_time.isoformat(),
+                "timeZone": "Europe/Moscow",
+            },
+            "end": {
+                "dateTime": event.end_time.isoformat(),
+                "timeZone": "Europe/Moscow",
+            },
+            "reminders": {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": 15},
+                ],
+            },
+            # Add color based on lesson type
+            # https://developers.google.com/calendar/api/v3/reference/colors/get
+            "colorId": self._get_event_color(event.lesson_type),
+            # Add extended properties for better tracking
+            "extendedProperties": {
+                "private": {
+                    "teacher": event.teacher,
+                    "group": event.group,
+                    "lessonType": event.lesson_type.value,
+                    "subgroup": str(event.subgroup) if event.subgroup else "",
+                    "source": "mtuci_sync",
+                }
+            },
+        }
+
+        self._logger.debug(
+            "created_event_body",
+            summary=summary,
+            start=event.start_time.isoformat(),
+            end=event.end_time.isoformat(),
+        )
+
+        return event_body
+
+    def _get_event_color(self, lesson_type: LessonType) -> str:
+        """
+        Get Google Calendar color ID for lesson type.
+
+        Args:
+            lesson_type: Type of the lesson
+
+        Returns:
+            Google Calendar color ID (1-11)
+
+        Note:
+            Color IDs reference:
+            1: Lavender
+            2: Sage
+            3: Grape
+            4: Flamingo
+            5: Banana
+            6: Tangerine
+            7: Peacock
+            8: Graphite
+            9: Blueberry
+            10: Basil
+            11: Tomato
+        """
+        color_map = {
+            LessonType.LECTURE: "9",  # Blueberry
+            LessonType.PRACTICE: "10",  # Basil
+            LessonType.LAB: "7",  # Peacock
+        }
+        return color_map.get(lesson_type, "1")

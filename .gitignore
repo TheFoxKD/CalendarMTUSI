@@ -507,3 +507,4 @@ cython_debug/
 .idea/
 /credentials.json
 /token.json
+/uv.lock

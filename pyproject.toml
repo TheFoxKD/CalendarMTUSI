@@ -97,7 +97,9 @@ ignore = [
     "SIM102", # sometimes it's better to nest
     "UP038", # Checks for uses of isinstance/issubclass that take a tuple
     "COM812", # Missing trailing comma
-    "ISC001"   # Single line implicit string concatenation
+    "ISC001", # Single line implicit string concatenation
+    "RUF001", # Checks for ambiguous Unicode characters in strings (e.g., Greek and Latin letters)
+    "RUF003", # Checks for ambiguous Unicode characters in comments (e.g., Greek and Latin letters)
 ]
 # The fixes in extend-unsafe-fixes will require
 # provide the `--unsafe-fixes` flag when fixing.
