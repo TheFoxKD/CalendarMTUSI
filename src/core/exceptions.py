@@ -16,6 +16,7 @@ class ScrapingError(ApplicationError):
     SCHEDULE_NOT_FOUND = "Schedule container not found on page"
     SUBJECT_NOT_FOUND = "Subject element not found in lesson"
     INFO_DIV_NOT_FOUND = "Information div not found in lesson"
+    NAVIGATION_FAILED = "Failed to navigate to schedule page"
 
 
 class ValidationError(ApplicationError):

@@ -8,6 +8,9 @@ from playwright.async_api import TimeoutError
 from pydantic import BaseModel
 from pydantic import EmailStr
 
+from src.core.exceptions import ApplicationError
+from src.core.exceptions import ScrapingError
+
 logger = structlog.get_logger(__name__)
 
 
@@ -116,37 +119,93 @@ class MTUCIAuthenticator:
         return any(x in title for x in auth_titles)
 
     async def _check_auth_state(self, page: Page) -> bool:
-        """
-        Check if already authenticated by analyzing page content.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            bool: True if authenticated, False otherwise
-        """
+        """Check if already authenticated."""
         try:
-            if await self._check_login_form(page):
-                self._logger.debug("Login form found")
+            # First check - look for the main layout elements
+            layout_elements = [
+                "#side-menu",
+                ".user-panel",
+                "#main-menu",
+            ]
+
+            for selector in layout_elements:
+                if await page.query_selector(selector):
+                    self._logger.info(
+                        "Found authenticated layout element", selector=selector
+                    )
+                    return True
+
+            # Second check - verify we're not on the login page
+            login_form = await page.query_selector("#kc-form-login")
+            if login_form:
+                self._logger.debug("Login form found, not authenticated")
                 return False
 
-            if await self._check_auth_elements(page):
+            # Third check - look for the username in the header
+            try:
+                username_el = await page.query_selector(".user-panel h4")
+                if username_el:
+                    self._logger.info("Found username element")
+                    return True
+            except PlaywrightError as e:
+                self._logger.warning("Error checking auth state", error=str(e))
                 return False
-
-            if await self._check_success_indicators(page):
-                return True
-
-            if await self._check_page_title(page):
-                self._logger.debug("Authenticated page title found")
-                return True
-
-            self._logger.warning("Ambiguous auth state")
+            else:
+                return False
 
         except PlaywrightError as e:
-            self._logger.warning("Failed to check auth state", error=str(e))
+            self._logger.warning("Error checking auth state", error=str(e))
             return False
-        else:
-            return False
+
+    async def navigate_to_schedule(self, page: Page) -> None:
+        """Navigate to schedule page with retry logic."""
+        max_retries = 3
+        base_delay = 1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Navigate to schedule page
+                await page.goto(
+                    "https://lk.mtuci.ru/student/schedule",
+                    wait_until="networkidle",
+                    timeout=30000,
+                )
+
+                # Wait for schedule container
+                await page.wait_for_selector(".schedule-lessons", timeout=10000)
+                self._logger.info("Successfully navigated to schedule page")
+
+            except Exception as e:
+                delay = base_delay * (attempt + 1)
+                self._logger.warning(
+                    "Navigation attempt failed",
+                    attempt=attempt + 1,
+                    delay=delay,
+                    error=str(e),
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(delay)
+                else:
+                    raise ScrapingError(ScrapingError.NAVIGATION_FAILED) from e
+            else:
+                return
+
+    async def _setup_page(self, page: Page) -> None:
+        """Setup page and authenticate."""
+        try:
+            # Authenticate
+            await self.authenticate(page)
+
+            # Navigate to schedule with retry logic
+            await self.navigate_to_schedule(page)
+
+            # Additional waiting for dynamic content
+            await page.wait_for_load_state("networkidle")
+
+        except Exception as e:
+            error_message = "Failed to setup page"
+            self._logger.exception(error_message, error=str(e))
+            raise ApplicationError(error_message) from e
 
     def _raise_validation_error(self, field: str, error: Exception) -> None:
         """Raise validation error with context."""
