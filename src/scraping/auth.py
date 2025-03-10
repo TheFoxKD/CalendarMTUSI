@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from pydantic import EmailStr
 
 from src.core.exceptions import ApplicationError
-from src.core.exceptions import ScrapingError
 
 logger = structlog.get_logger(__name__)
 
@@ -159,36 +158,128 @@ class MTUCIAuthenticator:
 
     async def navigate_to_schedule(self, page: Page) -> None:
         """Navigate to schedule page with retry logic."""
-        max_retries = 3
+        max_retries = 5  # Increased from 3 to 5
         base_delay = 1  # seconds
+        max_timeout = 60000  # Increased from 30000 to 60000 (60 seconds)
 
         for attempt in range(max_retries):
             try:
+                self._logger.info(
+                    f"Navigating to schedule page (attempt {attempt+1}/{max_retries})"
+                )
+
+                # Use progressively less strict wait conditions with each retry
+                if attempt < 2:
+                    wait_condition = "domcontentloaded"  # Fastest, least strict
+                    current_timeout = max_timeout
+                elif attempt < 4:
+                    wait_condition = (
+                        "load"  # Medium, waits for resources but not network idle
+                    )
+                    current_timeout = max_timeout
+                else:
+                    wait_condition = (
+                        "networkidle"  # Strictest, waits for network to be idle
+                    )
+                    current_timeout = max_timeout * 2
+
+                self._logger.info(
+                    f"Using wait condition: {wait_condition} with timeout: {current_timeout}ms"
+                )
+
                 # Navigate to schedule page
                 await page.goto(
                     "https://lk.mtuci.ru/student/schedule",
-                    wait_until="networkidle",
-                    timeout=30000,
+                    wait_until=wait_condition,
+                    timeout=current_timeout,
                 )
 
-                # Wait for schedule container
-                await page.wait_for_selector(".schedule-lessons", timeout=10000)
-                self._logger.info("Successfully navigated to schedule page")
+                # Add a small delay to allow for any dynamic content to load
+                await asyncio.sleep(1)
 
-            except Exception as e:
-                delay = base_delay * (attempt + 1)
+                # Check if we're actually on the schedule page
+                if await self._verify_schedule_page(page):
+                    self._logger.info("Successfully navigated to schedule page")
+                    return
+                # Try a direct approach if verification fails
+                if attempt >= 3:
+                    self._logger.info("Trying direct element interaction approach")
+                    try:
+                        # Try clicking on schedule link if available
+                        schedule_link = await page.query_selector(
+                            "a[href='/student/schedule']"
+                        )
+                        if schedule_link:
+                            await schedule_link.click()
+                            await asyncio.sleep(2)
+                            if await self._verify_schedule_page(page):
+                                self._logger.info(
+                                    "Successfully navigated to schedule page via link click"
+                                )
+                                return
+                    except PlaywrightError as e:
+                        self._logger.warning(f"Direct interaction failed: {e!s}")
+
                 self._logger.warning(
-                    "Navigation attempt failed",
-                    attempt=attempt + 1,
-                    delay=delay,
+                    f"Schedule page verification failed (attempt {attempt+1})"
+                )
+
+            except PlaywrightError as e:
+                # Log the error and retry
+                self._logger.warning(
+                    f"Error navigating to schedule page (attempt {attempt+1}/{max_retries})",
                     error=str(e),
                 )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(delay)
-                else:
-                    raise ScrapingError(ScrapingError.NAVIGATION_FAILED) from e
-            else:
-                return
+
+                # If this is the last attempt, raise the error
+                if attempt == max_retries - 1:
+                    self._logger.error(
+                        "Max retries exceeded for schedule navigation", error=str(e)
+                    )
+                    raise
+
+            # Exponential backoff: wait longer with each retry
+            delay = base_delay * (2**attempt)
+            self._logger.info(f"Retrying in {delay} seconds...")
+            await asyncio.sleep(delay)
+
+        # If we've exhausted retries, raise an error
+        raise AuthenticationError(AuthenticationError.AUTH_TIMEOUT)
+
+    async def _verify_schedule_page(self, page: Page) -> bool:
+        """Verify that we're on the schedule page."""
+        try:
+            # Look for elements that indicate we're on the schedule page
+            schedule_indicators = [
+                ".schedule-month",  # Month selector
+                ".button-day",  # Day buttons
+                ".schedule-lessons",  # Lessons container
+                "schedule-page",  # The component itself
+                "h4.current-day",  # Current day header
+                ".lessons-tabs",  # Tabs for different schedule views
+            ]
+
+            for selector in schedule_indicators:
+                element = await page.query_selector(selector)
+                if element:
+                    self._logger.debug(f"Found schedule indicator: {selector}")
+                    return True
+
+            # Check URL as a fallback
+            current_url = page.url
+            if "schedule" in current_url:
+                self._logger.debug(f"URL contains 'schedule': {current_url}")
+                return True
+
+            # If we reach here, we didn't find any of the indicators
+            self._logger.warning(
+                "Schedule page verification failed, no indicators found"
+            )
+            return False
+
+        except PlaywrightError as e:
+            self._logger.warning("Error checking schedule page", error=str(e))
+            return False
 
     async def _setup_page(self, page: Page) -> None:
         """Setup page and authenticate."""
@@ -199,8 +290,15 @@ class MTUCIAuthenticator:
             # Navigate to schedule with retry logic
             await self.navigate_to_schedule(page)
 
-            # Additional waiting for dynamic content
-            await page.wait_for_load_state("networkidle")
+            # Additional waiting for dynamic content with more generous timeout
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                self._logger.info("Page fully loaded (networkidle state reached)")
+            except PlaywrightError as e:
+                # Log but don't fail if this times out - the page might still be usable
+                self._logger.warning(
+                    "Networkidle state not reached, continuing anyway", error=str(e)
+                )
 
         except Exception as e:
             error_message = "Failed to setup page"
